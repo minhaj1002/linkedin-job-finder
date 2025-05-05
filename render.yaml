@@ -1,9 +1,0 @@
-services:
-  - type: web
-    name: linkedin-job-scraper
-    env: node
-    plan: free
-    buildCommand: |
-      pnpm exec playwright install   
-      npm install
-    startCommand: npm run start
