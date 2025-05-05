@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "postinstall": "playwright install chromium"
+    "postinstall": "pnpm exec playwright install --with-deps"
   },
   "dependencies": {
     "@radix-ui/react-collapsible": "^1.1.8",
