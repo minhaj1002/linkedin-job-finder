@@ -6,7 +6,7 @@ import * as playwright from "playwright"
 const CACHE_TIME = 30 * 60 * 1000 // 30 minutes
 
 // In-memory cache for development
-const jobCache = new Map<string, { jobs: Job[]; timestamp: number }>()
+const jobCache = new Map<string, { jobs: Job[]; timestamp: number; totalCount: number }>()
 
 // Create a cached version of the scrape function
 export const scrapeLinkedInJobs = cache(async function scrapeLinkedInJobsInternal({
@@ -14,89 +14,104 @@ export const scrapeLinkedInJobs = cache(async function scrapeLinkedInJobsInterna
     location = "",
     jobType = "all",
     datePosted = "anytime",
-    page = 1,
-}: ScrapeOptions): Promise<{ jobs: Job[]; totalCount: number; isFromCache: boolean }> {
+}: ScrapeOptions): Promise<{ jobs: Job[]; totalCount: number; isFromCache: boolean; error?: string }> {
     // Create a cache key based on search parameters
-    const cacheKey = `${keywords}-${location}-${jobType}-${datePosted}-${page}`
+    const cacheKey = `${keywords}-${location}-${jobType}-${datePosted}`
 
     // Check if we have cached results
     const cachedResult = jobCache.get(cacheKey)
     if (cachedResult && Date.now() - cachedResult.timestamp < CACHE_TIME) {
         console.log("Using cached results for", cacheKey)
-        return { jobs: cachedResult.jobs, totalCount: cachedResult.jobs.length * 3, isFromCache: true }
-    }
-
-    // Build LinkedIn search URL
-    let searchUrl = `https://www.linkedin.com/jobs/search/?keywords=${encodeURIComponent(keywords)}`
-
-    if (location) {
-        searchUrl += `&location=${encodeURIComponent(location)}`
-    }
-
-    // Add job type filter
-    if (jobType !== "all") {
-        const jobTypeMap: Record<string, string> = {
-            fulltime: "F",
-            parttime: "P",
-            contract: "C",
-            temporary: "T",
-            internship: "I",
-            remote: "R",
-        }
-
-        if (jobTypeMap[jobType]) {
-            searchUrl += `&f_JT=${jobTypeMap[jobType]}`
+        return {
+            jobs: cachedResult.jobs,
+            totalCount: cachedResult.totalCount,
+            isFromCache: true,
         }
     }
-
-    // Add date posted filter
-    if (datePosted !== "anytime") {
-        const datePostedMap: Record<string, string> = {
-            past24hours: "r86400",
-            pastWeek: "r604800",
-            pastMonth: "r2592000",
-        }
-
-        if (datePostedMap[datePosted]) {
-            searchUrl += `&f_TPR=${datePostedMap[datePosted]}`
-        }
-    }
-
-    // Add pagination
-    if (page > 1) {
-        const start = (page - 1) * 25
-        searchUrl += `&start=${start}`
-    }
-
 
     try {
         // Use Playwright to scrape LinkedIn
-        console.log("Scraping LinkedIn with Playwright:", searchUrl)
-        const jobs = await scrapeWithPlaywright(searchUrl)
+        console.log("Scraping LinkedIn with Playwright for:", keywords, location, jobType, datePosted)
+
+        // Build LinkedIn search URL
+        let searchUrl = `https://www.linkedin.com/jobs/search/?keywords=${encodeURIComponent(keywords)}`
+
+        if (location) {
+            searchUrl += `&location=${encodeURIComponent(location)}`
+        }
+
+        // Add job type filter
+        if (jobType !== "all") {
+            const jobTypeMap: Record<string, string> = {
+                fulltime: "F",
+                parttime: "P",
+                contract: "C",
+                temporary: "T",
+                internship: "I",
+                remote: "R",
+            }
+
+            if (jobTypeMap[jobType]) {
+                searchUrl += `&f_JT=${jobTypeMap[jobType]}`
+            }
+        }
+
+        // Add date posted filter
+        if (datePosted !== "anytime") {
+            const datePostedMap: Record<string, string> = {
+                past24hours: "r86400",
+                pastWeek: "r604800",
+                pastMonth: "r2592000",
+            }
+
+            if (datePostedMap[datePosted]) {
+                searchUrl += `&f_TPR=${datePostedMap[datePosted]}`
+            }
+        }
+
+        const { jobs, totalCount } = await scrapeWithPlaywright(searchUrl)
 
         // Cache the results
-        jobCache.set(cacheKey, { jobs, timestamp: Date.now() })
+        jobCache.set(cacheKey, {
+            jobs,
+            timestamp: Date.now(),
+            totalCount,
+        })
 
-        return { jobs, totalCount: jobs.length * 3, isFromCache: false }
-    } catch (error) {
-        console.error("Error during scraping:", error)
+        return {
+            jobs,
+            totalCount,
+            isFromCache: false,
+        }
+    } catch (err: unknown) {
+        console.error("Error during scraping:", err)
 
-        // Return mock data as fallback
-        console.log("Scraping failed, using mock data instead")
-        const mockJobs = getMockJobs(keywords, location, jobType, datePosted, 15)
+        let errorMessage = "Failed to retrieve job listings from LinkedIn. Showing mock data instead."
 
-        // Cache the mock results
-        jobCache.set(cacheKey, { jobs: mockJobs, timestamp: Date.now() })
+        if (err instanceof Error) {
+            if (err.message.includes("timeout")) {
+                errorMessage = "LinkedIn scraping timed out. Showing mock data instead. Try a more specific search."
+            } else if (err.message.includes("navigation")) {
+                errorMessage = "Failed to access LinkedIn. Showing mock data instead. Please try again later."
+            } else {
+                errorMessage = `LinkedIn scraping error: ${err.message}. Showing mock data instead.`
+            }
+        }
 
-        return { jobs: mockJobs, totalCount: 125, isFromCache: false }
+        return {
+            jobs: [],
+            totalCount: 0,
+            isFromCache: false,
+            error: errorMessage,
+        }
     }
 })
 
 // Scrape with Playwright (browser automation)
-async function scrapeWithPlaywright(url: string): Promise<Job[]> {
+async function scrapeWithPlaywright(url: string): Promise<{ jobs: Job[]; totalCount: number }> {
     // Add a timeout to prevent hanging
-    const timeoutPromise = new Promise<Job[]>((_, reject) => {
-        setTimeout(() => reject(new Error("Scraping timeout")), 25000)
+    const timeoutPromise = new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error("Scraping timeout after 25 seconds")), 25000)
     })
 
     const scrapePromise = (async () => {
@@ -144,77 +159,115 @@ async function scrapeWithPlaywright(url: string): Promise<Job[]> {
             // Create a new page
             const page = await context.newPage()
 
-            // Navigate to the URL
-            await page.goto(url, { waitUntil: "domcontentloaded", timeout: 20000 })
+            // Set a shorter timeout for navigation
+            page.setDefaultNavigationTimeout(15000)
+            page.setDefaultTimeout(10000)
 
-            // Wait for the job listings to load
-            await page.waitForSelector(".jobs-search__results-list", { timeout: 15000 }).catch(() => {
-                console.log("Timeout waiting for job listings")
-            })
+            // Navigate to the URL
+            await page.goto(url, { waitUntil: "domcontentloaded" })
+
+            // Wait for the job listings to load with a more reliable selector
+            await page
+                .waitForSelector(".jobs-search__results-list, .jobs-search-results-list", { timeout: 10000 })
+                .catch(() => {
+                    console.log("Timeout waiting for job listings, will try to extract anyway")
+                })
 
             // Add a small delay to let dynamic content load
-            await page.waitForTimeout(2000)
+            await page.waitForTimeout(1000)
 
-            console.log("Page loaded, extracting job data...");
-
+            console.log("Page loaded, extracting job data...")
 
             // Extract job data
-            const jobs = await page.evaluate(() => {
-                const jobListings = Array.from(document.querySelectorAll(".jobs-search__results-list > li"))
+            const result = await page.evaluate(() => {
+                // Try different selectors for job listings to improve reliability
+                const jobListingsSelectors = [
+                    ".jobs-search__results-list > li",
+                    ".jobs-search-results-list > li",
+                    "[data-job-id]",
+                ]
 
-                return jobListings.slice(0, 15).map((job) => {
-                    const titleElement = job.querySelector(".base-search-card__title")
-                    const companyElement = job.querySelector(".base-search-card__subtitle")
-                    const locationElement = job.querySelector(".job-search-card__location")
-                    const linkElement = job.querySelector("a.base-card__full-link") as HTMLAnchorElement
-                    const logoElement = job.querySelector(".artdeco-entity-image") as HTMLImageElement
-                    const dateElement = job.querySelector("time.job-search-card__listdate")
-                    const salaryElement = job.querySelector(".job-search-card__salary-info")
+                let jobListings: Element[] = []
 
-                    // Generate a job type based on the title
-                    const title = titleElement?.textContent?.trim() || ""
-                    let jobType = "Full-time"
-
-
-                    if (title.toLowerCase().includes("part-time") || title.toLowerCase().includes("part time")) {
-                        jobType = "Part-time"
-                    } else if (title.toLowerCase().includes("contract")) {
-                        jobType = "Contract"
-                    } else if (title.toLowerCase().includes("intern")) {
-                        jobType = "Internship"
-                    } else if (title.toLowerCase().includes("remote")) {
-                        jobType = "Remote"
+                // Try each selector until we find job listings
+                for (const selector of jobListingsSelectors) {
+                    const elements = Array.from(document.querySelectorAll(selector))
+                    if (elements.length > 0) {
+                        jobListings = elements
+                        break
                     }
+                }
 
-                    // Generate random skills based on the job title
-                    const skillSets = [
-                        ["JavaScript", "React", "Node.js", "TypeScript"],
-                        ["Python", "Django", "Flask", "AWS"],
-                        ["Java", "Spring", "Hibernate", "Microservices"],
-                        ["C#", ".NET", "Azure", "SQL Server"],
-                        ["Go", "Docker", "Kubernetes", "CI/CD"],
-                    ]
 
-                    const randomIndex = Math.floor(Math.random() * skillSets.length)
+                return {
+                    jobs: jobListings.slice(0, 25).map((job) => {
+                        // Try different selectors for each element to improve reliability
+                        const titleElement = job.querySelector(
+                            ".base-search-card__title, .job-card-list__title, .job-card-container__link",
+                        )
+                        const companyElement = job.querySelector(
+                            ".base-search-card__subtitle, .job-card-container__company-name, .job-card-container__primary-description",
+                        )
+                        const locationElement = job.querySelector(
+                            ".job-search-card__location, .job-card-container__metadata-item, .job-card-container__metadata-wrapper span",
+                        )
+                        const linkElement = job.querySelector(
+                            "a.base-card__full-link, a.job-card-list__title, a.job-card-container__link",
+                        ) as HTMLAnchorElement
+                        const logoElement = job.querySelector(
+                            ".artdeco-entity-image, .job-card-container__company-logo",
+                        ) as HTMLImageElement
+                        const dateElement = job.querySelector(
+                            "time.job-search-card__listdate, .job-card-container__posted-date, .job-card-container__metadata-item--posted-date",
+                        )
 
-                    return {
-                        id: Math.random().toString(36).substring(2, 15),
-                        title: titleElement?.textContent?.trim() || "Unknown Position",
-                        company: companyElement?.textContent?.trim() || "Unknown Company",
-                        location: locationElement?.textContent?.trim() || "Unknown Location",
-                        jobType,
-                        datePosted: dateElement?.textContent?.trim() || "Recently posted",
-                        description:
-                            "This position requires expertise in various technologies. Click to view the full job description.",
-                        url: linkElement?.href || "#",
-                        logoUrl: logoElement?.src || undefined,
-                        salary: salaryElement?.textContent?.trim() || undefined,
-                        skills: skillSets[randomIndex],
-                    }
-                })
+                        // Generate a job type based on the title
+                        const title = titleElement?.textContent?.trim() || ""
+                        let jobType = "Full-time"
+
+                        if (title.toLowerCase().includes("part-time") || title.toLowerCase().includes("part time")) {
+                            jobType = "Part-time"
+                        } else if (title.toLowerCase().includes("contract")) {
+                            jobType = "Contract"
+                        } else if (title.toLowerCase().includes("intern")) {
+                            jobType = "Internship"
+                        } else if (title.toLowerCase().includes("remote")) {
+                            jobType = "Remote"
+                        }
+
+                        // Generate random skills based on the job title
+                        const skillSets = [
+                            ["JavaScript", "React", "Node.js", "TypeScript"],
+                            ["Python", "Django", "Flask", "AWS"],
+                            ["Java", "Spring", "Hibernate", "Microservices"],
+                            ["C#", ".NET", "Azure", "SQL Server"],
+                            ["Go", "Docker", "Kubernetes", "CI/CD"],
+                        ]
+
+                        const randomIndex = Math.floor(Math.random() * skillSets.length)
+                        const location = locationElement?.textContent?.trim() || "Unknown Location"
+
+                        return {
+                            id: Math.random().toString(36).substring(2, 15),
+                            title: titleElement?.textContent?.trim() || "Unknown Position",
+                            company: companyElement?.textContent?.trim() || "Unknown Company",
+                            location: location,
+                            jobType,
+                            datePosted: dateElement?.textContent?.trim() || "Recently posted",
+                            description:
+                                "This position requires expertise in various technologies. Click to view the full job description.",
+                            url: linkElement?.href || "#",
+                            logoUrl: logoElement?.src || undefined,
+                            skills: skillSets[randomIndex],
+                        }
+                    }),
+                }
             })
 
-            return jobs
+            return {
+                jobs: result.jobs,
+                totalCount: result.jobs.length || 0,
+            }
         } finally {
             // Always close the browser to prevent memory leaks
             await browser.close()
@@ -222,133 +275,10 @@ async function scrapeWithPlaywright(url: string): Promise<Job[]> {
     })()
 
     // Race the scraping against the timeout
-    return Promise.race([scrapePromise, timeoutPromise])
-}
-
-// Generate mock data for testing and fallbacks
-function getMockJobs(keywords: string, location = "", jobType = "all", datePosted = "anytime", count = 10): Job[] {
-    const jobTypes = ["Full-time", "Part-time", "Contract", "Remote", "Internship"]
-    const datePostedOptions = ["1 day ago", "2 days ago", "3 days ago", "1 week ago", "Just now"]
-    const companies = [
-        "Tech Solutions Inc.",
-        "Global Innovations",
-        "Digital Enterprises",
-        "Future Systems",
-        "Smart Technologies",
-        "Nexus Corporation",
-        "Quantum Computing",
-        "Cyber Security Ltd",
-        "Cloud Platforms Inc",
-        "Data Analytics Co",
-    ]
-    const locations = location
-        ? [location, location, location, "Remote", location]
-        : [
-            "Remote",
-            "New York, NY",
-            "San Francisco, CA",
-            "Austin, TX",
-            "Seattle, WA",
-            "Boston, MA",
-            "Chicago, IL",
-            "Los Angeles, CA",
-            "Denver, CO",
-            "Atlanta, GA",
-        ]
-    const salaries = [
-        "$80,000 - $100,000 a year",
-        "$120,000 - $150,000 a year",
-        "$60,000 - $80,000 a year",
-        "$100,000 - $130,000 a year",
-        "$90,000 - $110,000 a year",
-    ]
-    const skills = [
-        ["JavaScript", "React", "Node.js", "TypeScript"],
-        ["Python", "Django", "Flask", "AWS"],
-        ["Java", "Spring", "Hibernate", "Microservices"],
-        ["C#", ".NET", "Azure", "SQL Server"],
-        ["Go", "Docker", "Kubernetes", "CI/CD"],
-        ["PHP", "Laravel", "MySQL", "Redis"],
-        ["Ruby", "Rails", "PostgreSQL", "Heroku"],
-        ["Swift", "iOS", "Objective-C", "Mobile Development"],
-        ["Kotlin", "Android", "Firebase", "Mobile Development"],
-        ["Rust", "WebAssembly", "Systems Programming", "Performance"],
-    ]
-
-    // Generate job titles based on keywords
-    const generateJobTitle = (keyword: string, index: number) => {
-        const roles = [
-            "Specialist",
-            "Engineer",
-            "Developer",
-            "Manager",
-            "Analyst",
-            "Consultant",
-            "Architect",
-            "Designer",
-            "Lead",
-            "Director",
-            "Programmer",
-            "Administrator",
-            "Technician",
-            "Coordinator",
-            "Strategist",
-        ]
-        const prefixes = ["Senior", "Junior", "Principal", "Associate", ""]
-        const prefix = prefixes[Math.floor(Math.random() * prefixes.length)]
-        const role = roles[index % roles.length]
-
-        return prefix ? `${prefix} ${keyword} ${role}` : `${keyword} ${role}`
-    }
-
-    // Filter by job type if specified
-    const filteredJobTypes =
-        jobType !== "all" ? jobTypes.filter((type) => type.toLowerCase().includes(jobType.toLowerCase())) : jobTypes
-
-    // Filter by date posted if specified
-    let dateFilter = datePostedOptions
-    if (datePosted === "past24hours") {
-        dateFilter = ["Just now", "1 day ago"]
-    } else if (datePosted === "pastWeek") {
-        dateFilter = ["Just now", "1 day ago", "2 days ago", "3 days ago"]
-    } else if (datePosted === "pastMonth") {
-        dateFilter = datePostedOptions
-    }
-
-    return Array.from({ length: count }, (_, i) => {
-        const skillSet = skills[i % skills.length]
-        const company = companies[i % companies.length]
-        const title = generateJobTitle(keywords, i)
-        const location = locations[i % locations.length]
-        const jobType = filteredJobTypes[i % filteredJobTypes.length]
-        const datePosted = dateFilter[i % dateFilter.length]
-        const hasSalary = i % 3 === 0
-        const salary = hasSalary ? salaries[i % salaries.length] : undefined
-
-        // Generate a more detailed description
-        const description = `
-      ${company} is seeking a ${title} to join our team. 
-      This is a ${jobType.toLowerCase()} position ${location === "Remote" ? "that can be performed remotely" : `located in ${location}`}.
-      
-      The ideal candidate will have experience with ${skillSet.join(", ")}.
-      
-      ${hasSalary ? `This position offers a competitive salary range of ${salary}.` : ""}
-      
-      Apply now to join our innovative team!
-    `.trim()
-
-        return {
-            id: `mock-${i}-${Date.now()}`,
-            title,
-            company,
-            location,
-            jobType,
-            datePosted,
-            description,
-            url: "https://linkedin.com/jobs",
-            logoUrl: `/placeholder.svg?height=40&width=40&text=${company.charAt(0)}`,
-            salary,
-            skills: skillSet,
-        }
-    })
+    return Promise.race([
+        scrapePromise,
+        timeoutPromise.then(() => {
+            throw new Error("Scraping timeout")
+        }),
+    ])
 }

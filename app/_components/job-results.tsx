@@ -22,7 +22,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Pagination } from "./pagination"
 import { JobSkeleton } from "./job-skeleton"
 import Image from "next/image"
-import { Job } from "@/types/job"
+import type { Job } from "@/types/job"
 
 export function JobResults() {
     const searchParams = useSearchParams()
@@ -33,13 +33,11 @@ export function JobResults() {
     const [totalCount, setTotalCount] = useState(0)
     const [currentPage, setCurrentPage] = useState(1)
     const [isFromCache, setIsFromCache] = useState(false)
+    const [itemsPerPage] = useState(10) // Fixed at 10 items per page
 
     useEffect(() => {
         const keywords = searchParams.get("keywords")
         if (!keywords) return
-
-        const page = Number.parseInt(searchParams.get("page") || "1")
-        setCurrentPage(page)
 
         const fetchJobs = async () => {
             setIsLoading(true)
@@ -55,10 +53,11 @@ export function JobResults() {
                 const controller = new AbortController()
                 const timeoutId = setTimeout(() => controller.abort(), 30000)
 
+                // Remove page parameter from API call
                 const response = await fetch(
                     `/api/jobs?keywords=${encodeURIComponent(keywords)}&location=${encodeURIComponent(
                         location,
-                    )}&jobType=${jobType}&datePosted=${datePosted}&page=${page}`,
+                    )}&jobType=${jobType}&datePosted=${datePosted}`,
                     { signal: controller.signal },
                 )
 
@@ -73,29 +72,30 @@ export function JobResults() {
                 // Check if there's a warning message from the API
                 if (data.error) {
                     setWarning(data.error)
+                } else if (!data.jobs || data.jobs.length === 0) {
+                    setWarning("No jobs found matching your criteria. Try broadening your search.")
                 }
 
                 setJobs(data.jobs || [])
                 setTotalCount(data.totalCount || 0)
                 setIsFromCache(data.isFromCache || false)
-            }
-            catch (err: unknown) {
+
+                // Reset to first page when new search is performed
+                setCurrentPage(1)
+            } catch (err: unknown) {
                 if (err instanceof Error) {
                     console.error("Error fetching jobs:", err)
 
-                    if (err.message.includes("AbortError")) {
-                        if (err.name === "AbortError") {
-                            setError("Request timed out. Please try again with a simpler search.")
-                        } else {
-                            setError("Failed to fetch job listings. Please try again later.")
-                        }
-
-                        // Set empty jobs array to avoid undefined errors
-                        setJobs([])
+                    if (err.name === "AbortError") {
+                        setError("Request timed out. Please try again with a simpler search.")
+                    } else {
+                        setError(`Failed to fetch job listings: ${err.message}`)
                     }
+
+                    // Set empty jobs array to avoid undefined errors
+                    setJobs([])
                 }
-            }
-            finally {
+            } finally {
                 setIsLoading(false)
             }
         }
@@ -104,19 +104,11 @@ export function JobResults() {
     }, [searchParams])
 
     const handlePageChange = (page: number) => {
-        const newParams = new URLSearchParams(searchParams.toString())
-        newParams.set("page", page.toString())
-        window.history.pushState(null, "", `?${newParams.toString()}`)
-
-        // Force a re-render by updating the current page
+        // Only update local state, no URL changes
         setCurrentPage(page)
 
         // Scroll to top
         window.scrollTo(0, 0)
-
-        // Trigger the useEffect to fetch new data
-        const event = new Event("popstate")
-        window.dispatchEvent(event)
     }
 
     if (!searchParams.get("keywords")) {
@@ -162,6 +154,19 @@ export function JobResults() {
         )
     }
 
+    // Calculate start and end indices for current page
+    const startIndex = (currentPage - 1) * itemsPerPage
+    const endIndex = Math.min(startIndex + itemsPerPage, jobs.length)
+
+    console.log({ jobs });
+
+
+    // Get jobs for current page
+    const displayedJobs = jobs.slice(startIndex, endIndex)
+
+    // Calculate total pages
+    const totalPages = Math.ceil(jobs.length / itemsPerPage)
+
     return (
         <div className="space-y-4">
             <div className="flex justify-between items-center">
@@ -191,7 +196,7 @@ export function JobResults() {
             ) : (
                 <>
                     <div className="grid grid-cols-1 gap-4">
-                        {jobs.map((job) => (
+                        {displayedJobs.map((job) => (
                             <Card key={job.id} className="overflow-hidden group hover:border-primary/50 transition-colors">
                                 <CardHeader className="pb-3">
                                     <div className="flex items-start justify-between">
@@ -276,12 +281,8 @@ export function JobResults() {
                         ))}
                     </div>
 
-                    {totalCount > jobs.length && (
-                        <Pagination
-                            currentPage={currentPage}
-                            totalPages={Math.ceil(totalCount / jobs.length)}
-                            onPageChange={handlePageChange}
-                        />
+                    {jobs.length > 10 && (
+                        <Pagination currentPage={currentPage} totalPages={totalPages} onPageChange={handlePageChange} />
                     )}
                 </>
             )}
