@@ -1,0 +1,16 @@
+[phases.setup]
+nixPkgs = ["nodejs_18", "playwright"]
+
+[phases.install]
+cmds = [
+  "pnpm install"
+]
+
+[phases.build]
+cmds = [
+  "pnpm exec playwright install --with-deps",
+  "pnpm run build"
+]
+
+[phases.start]
+cmd = "pnpm start"
