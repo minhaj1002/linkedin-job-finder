@@ -4,6 +4,6 @@ services:
     env: node
     plan: free
     buildCommand: |
-      npx playwright install --with-deps
+      pnpm exec playwright install   
       npm install
     startCommand: npm run start
